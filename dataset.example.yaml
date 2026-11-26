@@ -1,0 +1,9 @@
+# Set path to the actual image/label dataset before training.
+path: /absolute/path/to/pipe_dataset
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: crack
+  1: deposit
+  2: foreign
