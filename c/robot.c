@@ -254,6 +254,8 @@ THREAD_FN(network) {
 int main(int argc, char **argv) {
     const char *bind_ip = "127.0.0.1";
     long portnum = 43771;
+    if (argc == 2 && !strcmp(argv[1], "--check-hardware"))
+        return devices_probe() == 0 ? 0 : 1;
     if (argc != 1 && argc != 5 && argc != 7)
         goto usage;
     if (argc >= 5) {
@@ -348,6 +350,7 @@ int main(int argc, char **argv) {
     close_socket(udp);
     return started == 4 ? 0 : 1;
 usage:
-    fprintf(stderr, "robot [--sim|--hardware bind_IP station_IP port [stop_mm settle_ms]]\n");
+    fprintf(stderr, "robot [--sim|--hardware bind_IP station_IP port [stop_mm settle_ms]]\n"
+                    "robot-hw --check-hardware\n");
     return 2;
 }

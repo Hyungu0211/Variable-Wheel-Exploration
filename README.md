@@ -1,6 +1,16 @@
-# 배관 탐사 로봇 B안 · C 제어기와 Python 결함 검출기
+# Raspberry Pi 5용 배관 탐사 로봇 B안
 
-Pi 5에서 Python이 결함을 검출하고 C가 거리·자세·조종 명령과 결합해 바퀴를 제어하는 프로젝트다. Windows에서도 같은 C 판단 로직과 Python 프로그램으로 시연할 수 있다. 기본 실행 모드는 모의 주행이다.
+Python이 Pi 5의 카메라 영상에서 균열·퇴적물·이물질을 찾고, C가 거리·자세·조종 명령과 결합해 바퀴를 제어한다. 기본 실행은 모의 주행이다. 아래 설치 예시는 Raspberry Pi OS **Bookworm 64비트**를 기준으로 한다.
+
+### Pi 4에서 옮길 때 달라지는 점
+
+| 구성 | Pi 5에서 할 일 |
+|---|---|
+| C 제어와 프로세스 간 통신 | Pi 5에서 `make`로 제어기와 `libpipeipc.so`를 함께 빌드한다. 스레드 4개, Mutex, 공유 메모리, UDP 조종 방식은 공통이다. |
+| AX-12A 구동 모터 | 기존 USB–TTL 반이중 어댑터(예: U2D2의 3핀 TTL 포트)를 사용한다. `ls -l /dev/serial/by-id/`로 어댑터를 식별하고 해당 전체 경로를 `DXL_PORT`에 넣는다. by-id 항목이 없으면 어댑터를 뺐다 꽂아 확인한 `/dev/ttyUSB0` 등의 경로를 쓴다. 이 구성에서는 GPIO UART 설정이 필요 없다. 모터 전원은 별도로 공급한다. |
+| PCA9685·거리·자세 센서 | `sudo raspi-config`의 Interface Options에서 I2C를 켠다. 기본 헤더에서 SDA는 GPIO2(물리 핀 3), SCL은 GPIO3(핀 5)이다. `i2cdetect -l`로 버스 목록을 확인하고, ToF·IMU 드라이버가 실제로 노출한 측정 파일을 지정한다. |
+| Camera Module 3 | 전원을 끈 상태에서 카메라 쪽 15핀과 Pi 5 CAM/DISP 쪽 22핀을 잇는 Standard–Mini **카메라용** 케이블을 연결한다. `--list-cameras`에서 보이는 번호를 `--camera`에 준다. 한 대만 인식되면 일반적으로 0이다. 번호는 물리 커넥터 라벨과 별개다. |
+| 전원 | Pi 5 권장 전원은 5 V·5 A USB-C다. 기존 24 V 테더와 DC-DC 변환기를 쓴다면 Pi 입력 전압과 공급 가능 전류를 카메라·모터 동작 중 확인한다. |
 
 ## 1. 부품 없이 실행하기
 
@@ -9,6 +19,7 @@ Pi 5에서 Python이 결함을 검출하고 C가 거리·자세·조종 명령�
 **Raspberry Pi OS / Linux**
 
 ~~~sh
+sudo apt install build-essential
 make
 make test
 ~~~
@@ -89,12 +100,14 @@ Python 프로세스는 `ctypes`로 작은 C 라이브러리를 호출한다. Pi�
 4. Raspberry Pi OS에서 Camera Module 3를 활성화하고 `rpicam-hello --list-cameras`로 장치를 확인한다. Pi의 Python 가상환경은 시스템의 Picamera2를 읽을 수 있어야 한다. 아래는 준비 예다.
 
 ~~~sh
-sudo apt install python3-picamera2 python3-opencv python3-venv
+sudo apt install python3-picamera2 python3-opencv python3-venv rpicam-apps i2c-tools
 python3 -m venv --system-site-packages .venv
 . .venv/bin/activate
+python py/vision.py --list-cameras
 python -m pip install ultralytics ncnn
+python -c "import cv2, ncnn; from picamera2 import Picamera2; from ultralytics import YOLO"
 make
-python py/vision.py --mode camera --model ./best_ncnn_model --preview ./preview/latest.jpg
+python py/vision.py --mode camera --camera 0 --model ./best_ncnn_model --preview ./preview/latest.jpg
 ~~~
 
 C 제어기는 별도 터미널에서 실행한다. `--preview`를 주면 최신 검출 화면을 JPEG로 갱신한다. `python py/preview.py ./preview/latest.jpg --bind 192.168.10.2` 실행 후 노트북에서 http://192.168.10.2:8080/ 을 열면 된다(예시 주소). 결함 프레임과 시각·신뢰도·영역 좌표는 `events/`에 기록한다. 동일 종류가 계속 검출되면 최소 2초 간격으로 기록한다.
@@ -110,15 +123,26 @@ C 제어기는 별도 터미널에서 실행한다. `--preview`를 주면 최신
 - **ToF·IMU**는 원안에 정확한 칩 모델이 없어 Linux IIO/sysfs에 드라이버가 제공하는 수치 파일을 읽도록 구현했다. `/sys/bus/iio/devices/iio:device*/name`에서 장치를 식별하고 거리값 경로, mm 환산계수, 같은 단위인 가속도 3축 경로를 넣는다. IMU 기울기는 센서 X축 기준이며 장착 방향에 맞춰 조정한다. 다른 인터페이스를 사용하는 센서는 `devices_sense()`를 해당 드라이버에 맞춰 바꿔야 한다.
 - **지상국**은 한 대만 연결한다. 제어기는 설정한 노트북 IP의 UDP만 수신한다. 실습용 전용 이더넷에서 사용한다.
 
-DynamixelSDK의 C 라이브러리와 헤더를 설치한 뒤 실행한다. 기본 빌드는 CMake 방식 설치 경로인 `/usr/local/include/dynamixel_sdk_c`, `libdxl_c.so`를 사용한다. 기존 SDK의 경우 `make hardware DXL_INC=/usr/local/include/dynamixel_sdk DXL_LIB=-ldxl_sbc_c`처럼 설치 경로·라이브러리명을 지정한다.
+DYNAMIXEL C SDK는 Pi에서 빌드한다. 공식 SDK의 ARM용 Makefile을 사용하는 예시는 다음과 같다. 프로젝트 폴더에서 실행한다. 이미 CMake 방식으로 `/usr/local/include/dynamixel_sdk_c`와 `libdxl_c.so`를 설치했다면 `make hardware`로 바로 빌드할 수 있다.
 
 ~~~sh
-make hardware
+sudo apt install git build-essential
+git clone --depth 1 https://github.com/ROBOTIS-GIT/DynamixelSDK.git ../DynamixelSDK
+make -C ../DynamixelSDK/c/build/linux_sbc
+sudo make -C ../DynamixelSDK/c/build/linux_sbc install
+sudo ldconfig
+make hardware DXL_INC=../DynamixelSDK/c/include/dynamixel_sdk DXL_LIB=-ldxl_sbc_c
+~~~
+
+`--check-hardware`는 시리얼·I²C 장치 경로의 접근 권한을 확인하고 ToF·IMU를 한 번 읽는다. 모터나 서보에 명령을 보내지 않으므로 이 단계에서 모터 응답이나 서보 동작까지 확인되지는 않는다. 이 점검에는 장치 경로와 거리 환산계수만 필요하다. 주행을 시작할 때는 모터 설정과 채널별 서보 보정값도 채워야 한다.
+
+~~~sh
 cp hardware.env.example hardware.env
-# 실제 센서 파일 경로, 모터 ID 및 서보 보정값을 hardware.env에 입력
+nano hardware.env
 set -a
 . ./hardware.env
 set +a
+./build/robot-hw --check-hardware
 # 예시 IP. 마지막 두 인수는 시험으로 정한 정지 거리(mm)와 서보 이동 대기 시간(ms).
 ./build/robot-hw --hardware 192.168.10.2 192.168.10.1 43771 180 1800
 ~~~
@@ -127,9 +151,12 @@ Pi의 다른 터미널에서는 위 카메라 발행기를 실행한다. 노트�
 
 ## 검증 범위와 참고 자료
 
-Windows x64에서 C 제어기·IPC DLL을 빌드하고 Python과 UDP/공유 메모리로 연결한 모의 통합 시험을 수행했다. 실물 배선, Pi용 SDK 빌드, 실제 모델 정확도·FPS, 제동 거리, 서보 보정은 팀 장비에서 확인할 항목이다.
+Windows x64에서 C 제어기와 IPC DLL을 다시 빌드하고 Python과 UDP·공유 메모리로 연결해 모의 주행 통합 시험을 통과했다. 카메라 번호 선택·프레임 전달과 장치 경로·센서값 점검은 모의 장치로 시험했다. 실제 Pi 5에서의 SDK 빌드, 카메라 촬영·추론 속도, 모터 통신, 제동 거리와 서보 보정은 팀 장비에서 확인해야 한다.
 
 - [ROBOTIS AX-12A 제어 테이블](https://emanual.robotis.com/docs/en/dxl/ax/ax-12a/)
 - [DYNAMIXEL C SDK 설치](https://emanual.robotis.com/docs/en/software/dynamixel/dynamixel_sdk/library_setup/c/)
 - [Raspberry Pi용 YOLO와 NCNN](https://docs.ultralytics.com/guides/raspberry-pi/)
+- [Pi 5 사양과 전원](https://www.raspberrypi.com/products/raspberry-pi-5/)
+- [Pi 5 카메라 케이블](https://www.raspberrypi.com/products/camera-cable/)
+- [ROBOTIS U2D2 연결 및 별도 전원](https://emanual.robotis.com/docs/en/parts/interface/u2d2/)
 - [NXP PCA9685 데이터시트](https://www.nxp.com/docs/en/data-sheet/PCA9685.pdf)

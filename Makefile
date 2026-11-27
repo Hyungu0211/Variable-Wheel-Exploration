@@ -16,6 +16,6 @@ DXL_INC ?= /usr/local/include/dynamixel_sdk_c
 DXL_LIB ?= -ldxl_c
 hardware: build/robot-hw build/libpipeipc.so
 build/robot-hw: $(SRC) $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPIPE_HARDWARE -I$(DXL_INC) $(SRC) -o $@ $(DXL_LIB) $(LDLIBS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -D_XOPEN_SOURCE=700 -DPIPE_HARDWARE -I$(DXL_INC) $(SRC) -o $@ $(DXL_LIB) $(LDLIBS)
 test: all
 	python3 tests/integration.py

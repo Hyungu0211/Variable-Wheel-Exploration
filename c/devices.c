@@ -2,6 +2,10 @@
 #include <stdio.h>
 /* make hardware selects this branch. All other builds have no device access. */
 #ifndef PIPE_HARDWARE
+int devices_probe(void) {
+    fprintf(stderr, "Use the Linux hardware build (make hardware) for this check.\n");
+    return -1;
+}
 int devices_open(void) {
     return -1;
 }
@@ -32,20 +36,26 @@ void devices_close(void) {
 #include <math.h>
 #include <errno.h>
 #include <string.h>
+#include <limits.h>
 static int port = -1, pwm = -1, id[2], direction[2], pulse[2][4], limit;
 static double distance_factor;
 static const char *axes[3], *distance_file;
+static const char *pca_bus;
+static char serial_device[PATH_MAX];
 static bool port_ready = false, mode_checked = false;
 static bool number(const char *key, int low, int high, int *out) {
     const char *v = getenv(key);
     char *end;
-    if (!v || !*v)
-        return false;
-    long n = strtol(v, &end, 0);
-    if (*end || n < low || n > high)
-        return false;
-    *out = (int)n;
-    return true;
+    if (v && *v) {
+        errno = 0;
+        long n = strtol(v, &end, 0);
+        if (!errno && !*end && n >= low && n <= high) {
+            *out = (int)n;
+            return true;
+        }
+    }
+    fprintf(stderr, "Check %s in hardware.env (expected %d..%d).\n", key, low, high);
+    return false;
 }
 static bool read_value(const char *path, double *value) {
     FILE *f = fopen(path, "r");
@@ -62,19 +72,55 @@ static bool write_reg(int reg, int val) {
     unsigned char b[2] = {(unsigned char)reg, (unsigned char)val};
     return write(pwm, b, 2) == 2;
 }
-int devices_open(void) {
-    const char *serial = getenv("DXL_PORT"), *bus = getenv("PCA_BUS");
+static const char *device_path(const char *key, int mode) {
+    const char *path = getenv(key);
+    if (!path || !*path) {
+        fprintf(stderr, "Set %s in hardware.env.\n", key);
+        return NULL;
+    }
+    if (access(path, mode) != 0) {
+        fprintf(stderr, "%s (%s): %s\n", key, path, strerror(errno));
+        return NULL;
+    }
+    return path;
+}
+static bool device_paths(void) {
+    const char *serial = device_path("DXL_PORT", R_OK | W_OK);
+    pca_bus = device_path("PCA_BUS", R_OK | W_OK);
+    distance_file = device_path("TOF_PATH", R_OK);
+    axes[0] = device_path("ACCEL_X", R_OK);
+    axes[1] = device_path("ACCEL_Y", R_OK);
+    axes[2] = device_path("ACCEL_Z", R_OK);
     const char *factor = getenv("TOF_MM_PER_UNIT");
     char *end;
-    int baud, addr;
-    distance_file = getenv("TOF_PATH");
-    axes[0] = getenv("ACCEL_X");
-    axes[1] = getenv("ACCEL_Y");
-    axes[2] = getenv("ACCEL_Z");
-    if (!serial || !bus || !distance_file || !factor || !axes[0] || !axes[1] || !axes[2])
+    distance_factor = strtod(factor ? factor : "", &end);
+    if (*end || !isfinite(distance_factor) || distance_factor <= 0) {
+        fprintf(stderr, "Set TOF_MM_PER_UNIT to a positive mm conversion factor.\n");
+        return false;
+    }
+    if (!serial || !pca_bus || !distance_file || !axes[0] || !axes[1] || !axes[2])
+        return false;
+    if (!realpath(serial, serial_device)) {
+        perror(serial);
+        return false;
+    }
+    return true;
+}
+int devices_probe(void) {
+    Sensor sample = {0};
+    if (!device_paths())
         return -1;
-    distance_factor = strtod(factor, &end);
-    if (*end || !isfinite(distance_factor) || distance_factor <= 0)
+    printf("Serial: %s\nI2C: %s\n", serial_device, pca_bus);
+    if (!devices_sense(&sample)) {
+        fprintf(stderr, "Invalid ToF/IMU sample; check IIO files, units and sensor readings.\n");
+        return -1;
+    }
+    printf("ToF: %d mm, tilt: %.2f deg. No actuator commands sent.\n", sample.mm, sample.tilt);
+    return 0;
+}
+int devices_open(void) {
+    int baud, addr;
+    if (!device_paths())
         return -1;
     if (!number("DXL_BAUD", 9600, 1000000, &baud) || !number("PCA_ADDR", 3, 119, &addr) ||
         !number("DXL_LIMIT", 1, 1023, &limit))
@@ -97,10 +143,12 @@ int devices_open(void) {
             if (!number(key, 500, 2500, &pulse[j][i]))
                 return -1;
         }
-    port = portHandler(serial);
+    port = portHandler(serial_device);
     packetHandler();
-    if (port < 0 || !openPort(port))
+    if (port < 0 || !openPort(port)) {
+        fprintf(stderr, "Cannot open motor port %s.\n", serial_device);
         return -1;
+    }
     port_ready = true;
     if (!setBaudRate(port, baud))
         return -1;
@@ -115,9 +163,11 @@ int devices_open(void) {
     mode_checked = true;
     if (!devices_drive(0))
         return -1;
-    pwm = open(bus, O_RDWR);
-    if (pwm < 0 || ioctl(pwm, I2C_SLAVE, addr) < 0)
+    pwm = open(pca_bus, O_RDWR);
+    if (pwm < 0 || ioctl(pwm, I2C_SLAVE, addr) < 0) {
+        fprintf(stderr, "PCA9685 %s at 0x%02x: %s\n", pca_bus, addr, strerror(errno));
         return -1;
+    }
     /* 25 MHz nominal, prescaler 121 -> approximately 50 Hz. */
     if (!write_reg(0, 0x10) || !write_reg(0xfe, 121) || !write_reg(0, 0x20))
         return -1;

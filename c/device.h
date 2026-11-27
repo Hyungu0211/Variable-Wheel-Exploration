@@ -7,6 +7,7 @@ typedef struct {
     uint64_t stamp;
 } Sensor;
 int devices_open(void);
+int devices_probe(void);
 bool devices_sense(Sensor *s);
 bool devices_wheel(int preset);
 bool devices_drive(int percent);
